@@ -241,7 +241,152 @@ julia> @code_tracked f(0.0)
   return %19
 ```
 
-- It is specialized for my purpose: a graph is constructed (`TapeConstant`, `TapeCall`, )
+- It is specialized for my purpose: a graph is constructed (out of `TapeConstant`, `TapeCall`, etc.)
+  directly in the transformed code.
+- `trackedcall` is basically overdub, and might recur based on the context argument (`%4`).
+- Branch arguments and jumps are recorded as well – to do this, rewriting some branching structure
+  and a new block are required!
+  
+```julia
+julia> track(x -> f(true) + x, 1)
+⟨var"#7#8"()⟩(⟨1⟩, ()...) → 2::Int64
+  @1: [Arg:§1:%1] var"#7#8"()::var"#7#8"
+  @2: [Arg:§1:%2] 1::Int64
+  @3: [§1:%3] ⟨f⟩(⟨true⟩, ()...) → 1::Int64
+    @1: [Arg:§1:%1] @3#1 → f::typeof(f)
+    @2: [Arg:§1:%2] @3#2 → true::Bool
+    @3: [§1:&2] return ⟨1⟩
+  @4: [§1:%4] ⟨+⟩(@3, @2, ()...) → 2::Int64
+    @1: [Arg:§1:%1] @4#1 → +::typeof(+)
+    @2: [Arg:§1:%2] @4#2 → 1::Int64
+    @3: [Arg:§1:%3] @4#3 → 1::Int64
+    @4: [§1:%4] ⟨add_int⟩(@2, @3) → 2::Int64
+    @5: [§1:&1] return @4 → 2::Int64
+  @5: [§1:&1] return @4 → 2::Int64
+```
+
+Using such traces, we can extract dynamic dependency graphs from Turing models:
+
+```julia
+julia> @model function test0(x)
+    λ ~ Gamma(2.0, inv(3.0))
+    m ~ Normal(0, sqrt(1 / λ))
+    x ~ Normal(m, sqrt(1 / λ))
+end
+
+julia> trackdependencies(test0(1.4))
+⟨2⟩ = 1.4
+⟨4:λ⟩ ~ Gamma(2.0, 0.3333333333333333) → 1.0351608689025245
+⟨5⟩ = /(1, ⟨4:λ⟩) → 0.9660334253749353
+⟨6⟩ = sqrt(⟨5⟩) → 0.982869994137035
+⟨8:m⟩ ~ Normal(0, ⟨6⟩) → -2.0155543806491205
+⟨9⟩ = /(1, ⟨4:λ⟩) → 0.9660334253749353
+⟨10⟩ = sqrt(⟨9⟩) → 0.982869994137035
+⟨12:x⟩ ⩪ Normal(⟨8:m⟩, ⟨10⟩) ← ⟨2⟩
+```
+
+However: I may have some bad decisions, still.  It’s pretty slow even after first compilation time.
+Also, I know too little about the type stability problems occuring in transformed IR to judge what
+works badly in that respect.
+  
+  
+# Conclusions
+
+## Cassette and IRTools Revisited
+
+I ended up with something that works a bit like Cassette, in principle:
+
+- Every function call is overloaded, and the `trackcall` call can decide what to do based on a
+  context.
+- Variables are, in a sense, “tagged”, based on their IR names.
+
+This sort of design has also happened to others before
+(cf. [Jaynes.jl](https://github.com/femtomc/Jaynes.jl)).
+
+However: you can’t easily write such an implementation in Cassette itself using just overdubbing: 
+
+- Branches, blocks and block arguments are not reified in the contextual dispatch mechanism
+- With a compiler pass you end up bookkeeping `CodeInfo` information yourself.
+
+IRTools works much better in this case, when you completely rebuilt the IR structure yourself with
+some changes to the control flow.  But even then: there are some quirks where blocks and branches
+aren’t treated as first-class citizens (like iteration over a block).
+
+(You can theoretically use IRTools within a Cassette compiler pass, but I don’t see the benefit of
+that, since you don’t need Cassette anymore at that point – you lose its advantages.)
+
+## IRTracker Reflections
+
+Now that I have learned about and understood most of these techniques, I have come to the
+conclusion that for this specific case, instead of tracking through a function whose structure is
+half known, it would be more easy and appropriate to change the way Turing records models.
+
+Lyndon White on Slack really nailed it:
+
+> Using Cassette on code you wrote is a bit like shooting youself with a experimental mind control
+> weapon, to force your hands to move like you knew how to fly a helicopter.  Even if it works, you
+> still had to learn to fly the helicopter in order to program the mind-control weapon to force
+> yourself to act like you knew how to fly a helicopter.
+
+On the other hand, IRTracker turned out to be pretty interesting in itself, and useful for more than
+just the described purpose.  For example, I have sometimes used it for debugging (what you really
+get is equivalent to a `println` after every atomic instruction… :))
+
+## My Wishlist
+
+What would be cool to have for an ideal IR-based metaprogramming system:
+
+- The capabilities of the IRTools representation, but with more features for blocks and branches
+- A system that works like overdubbing, but not only for functions: blocks and branches, and SSA
+  instructions themselves, should be reified and accessible as well.
+  
+The first goal would be achievable the existing IRTools by extension, and maybe rethinking some of
+its data structures.
+
+The second goal could in principle be factored out from IRTracker.  I imagine something like the
+following:
+
+```julia
+1: (%1, %2, %3)
+  %4 = Main.rand()
+  %5 = %4 < %3
+  br 2 (%5) unless %5
+  return %2
+2:
+  %6 = %2 + 1
+  %7 = Main.geom(%6, %3)
+  return %7
+```
+
+being transformed into something like
+
+```julia
+1: (%1, %4, %2, %3)
+  %5 = quoted(%4, Arg, :(%1), %1)
+  %6 = quoted(%4, Arg, :(%2),%2)
+  %7 = quoted(%4, Arg, :(%3), %3)
+  %8 = quoted(%4, Const, Main.rand)
+  %9 = overdub(%4, Call, :(%4), %8)
+  %10 = quoted(%4, Const, <)
+  %11 = overdub(%4, Call, :(%5), %10, %9, %7) 
+  %12 = quoted(%4, CondBranch, 2, %11)
+  %13 = quoted(%4, Return, %6)
+  br 2 unless %11
+  br 3 (%13)
+2:
+  %14 = quoted(%4, Const, +)
+  %15 = quoted(%4, Const, 1)
+  %16 = overdub(%4, Call, :(%6), %14, %6, %5)
+  %17 = quoted(%4, Const, Main.geom)
+  %18 = overdub(%4, Call, :(%7), %17, %16, %7)
+  %19 = quoted(%4, Return, %18)
+  br 3 (%19)
+3 (%20):
+  %21 = overdub(%4, Return, %20)
+  return %20
+```
+
+(where `%4` is the context argument, as above).
 
 
 
