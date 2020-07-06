@@ -248,6 +248,12 @@ julia> @code_tracked f(0.0)
   and a new block are required!
   
 ```julia
+julia> @code_ir (x -> f(true) + x)(1)
+1: (%1, %2)
+  %3 = Main.f(true)
+  %4 = %3 + %2
+  return %4
+  
 julia> track(x -> f(true) + x, 1)
 ⟨var"#7#8"()⟩(⟨1⟩, ()...) → 2::Int64
   @1: [Arg:§1:%1] var"#7#8"()::var"#7#8"
@@ -347,6 +353,10 @@ The second goal could in principle be factored out from IRTracker.  I imagine so
 following:
 
 ```julia
+geom(n, β) = rand() < β ? n : geom(n + 1, β)
+```
+
+```julia
 1: (%1, %2, %3)
   %4 = Main.rand()
   %5 = %4 < %3
@@ -363,27 +373,35 @@ being transformed into something like
 ```julia
 1: (%1, %4, %2, %3)
   %5 = quoted(%4, Arg, :(%1), %1)
-  %6 = quoted(%4, Arg, :(%2),%2)
-  %7 = quoted(%4, Arg, :(%3), %3)
-  %8 = quoted(%4, Const, Main.rand)
-  %9 = overdub(%4, Call, :(%4), %8)
-  %10 = quoted(%4, Const, <)
-  %11 = overdub(%4, Call, :(%5), %10, %9, %7) 
-  %12 = quoted(%4, CondBranch, 2, %11)
-  %13 = quoted(%4, Return, %6)
-  br 2 unless %11
-  br 3 (%13)
-2:
-  %14 = quoted(%4, Const, +)
-  %15 = quoted(%4, Const, 1)
-  %16 = overdub(%4, Call, :(%6), %14, %6, %5)
-  %17 = quoted(%4, Const, Main.geom)
-  %18 = overdub(%4, Call, :(%7), %17, %16, %7)
-  %19 = quoted(%4, Return, %18)
-  br 3 (%19)
-3 (%20):
-  %21 = overdub(%4, Return, %20)
-  return %20
+  %6 = overdub(%4, %5)
+  %7 = quoted(%4, Arg, :(%2), %2)
+  %8 = overdub(%4, %7)
+  %9 = quoted(%4, Arg, :(%3), %3)
+  %10 = overdub(%4, %9)
+  %11 = quoted(%4, Const, Main.rand)
+  %12 = quoted(%4, Call, :(%4), %11)
+  %13 = overdub(%4, %12)
+  %14 = quoted(%4, Const, <)
+  %15 = quoted(%4, Call, :(%5), %14, %12, %9) 
+  %16 = overdub(%4, %15)
+  %17 = quoted(%4, CondBranch, 2, %15)
+  %18 = quoted(%4, Return, %7)
+  br 2 (%17) unless %16
+  br 3 (%18)
+2: (%19)
+  %20 = overdub(%4, %19)
+  %21 = quoted(%4, Const, +)
+  %22 = quoted(%4, Const, 1)
+  %23 = quoted(%4, Call, :(%6), %21, %7, %22)
+  %24 = overdub(%4, %23)
+  %25 = quoted(%4, Const, Main.geom)
+  %26 = quoted(%4, Call, :(%7), %25, %23, %9)
+  %27 = overdub(%4, %26)
+  %28 = quoted(%4, Return, %27)
+  br 3 (%28)
+3 (%29):
+  %30 = overdub(%4, %29)
+  return %30
 ```
 
 (where `%4` is the context argument, as above).
