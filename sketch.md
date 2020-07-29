@@ -1,3 +1,7 @@
+# About Me
+
+I'm Philipp Gabler, Master's student at Graz University of Technology, and working at [Know-Center](https://www.know-center.tugraz.at/) where I wan't to begin a PhD when I'm finished with my thesis.
+
 # Intro & “Justification”
 
 This talk will describe my experiences with getting into IR-based metaprogramming, and my
